@@ -1,0 +1,1033 @@
+---
+title: "MovieLens Capstone Project"
+subtitle: "Professional Certificate PH125.9x"
+author: "Robert Gravelle"
+date: "2023-11-13"
+output: pdf_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, progress=TRUE, verbose=TRUE, dev='pdf')
+
+if(!require(pacman)) install.packages("pacman")
+library(pacman)
+p_load(ggplot2, devtools, benchmarkme, rmarkdown, lubridate, scales, parallel, stringr, kableExtra, tidyverse, caret)
+
+options(tinytex.verbose = TRUE)
+```
+
+\newpage
+# MovieLens
+
+## Introduction
+This is a report on the MovieLens data analysis and a recommendation model training and the models achieved performance. First the dataset is to be explored, possibly cleaned and inspected to evaluate possible training approaches. Next part is building a ML model to recommend movies to users.
+
+### Dataset
+Grouplens created a movie rating dataset. The 10M dataset [@harper2015] used in this project is a subset of 10 million ratings of 10'000 movies by 72'000 random selected users.
+
+## Initial setup
+Given is the loading of the MovieLens 10M dataset, split into an *edx* and a *final_holdout_test* set containing 10% of the MovieLens data only used for validating at the end. The dataset contains userId, movieId, rating, timestamp, title, and genre. 
+
+## Goal
+This dataset is used to explore and gain insight on how an effective recommendation algorithm could be developed. Such a machine learning algorithm is then developed and tested against the *final_holdout_test* set.
+
+## Summary
+The analysis revealed interesting properties and correlations of the various features. Among other things, older films tended to be rated higher than newer ones, and some genres were generally rated slightly higher or lower. Above all, however, the films and the users play a decisive role in developing a model. Unfortunately, only an RMSE of about 0.879 was possible with this method. For further interesting model trainings neither the time nor the available computing power was sufficient, for example other training approaches like KNN or Decision Tree could be tried.
+
+```{r include=FALSE, echo=FALSE, warning=FALSE}
+##########################################################
+# Create edx and final_holdout_test sets 
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+options(timeout = 120)
+
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Final hold-out test set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+# set.seed(1) # if using R 3.5 or earlier
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in final hold-out test set are also in edx set
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+removed <- anti_join(temp, final_holdout_test)
+```
+
+# Analysis
+
+## Data Inspection and preprocessing
+
+First lets take a closer look at the *edx* dataset structure and some of its content.
+
+`r knitr::kable(head(edx)) %>% kable_styling(font_size=8, latex_options="hold_position")`
+
+There are several columns in this dataset:
+
+* userId: an identifier for the individual user who rated the movie.
+* movieId: an identifier for movie that was rated.
+* rating: a rating that was given for this movie (from that user). The scale of the ratings is yet to be identified.
+* timestamp: a timestamp in UNIX format
+* title: the title of the movie including the year of release
+* genres: a list of genres associated with this movie. Multiple genres are separated by '|'. 
+
+There are several aspects of the edx dataset to consider exploring: 
+
+* Several movies may be rated way above average because of a very good story or production.
+* Some genres (or genre combinations) may be rated higher than others.
+* User ratings are possibly biased or generally rated higher or lower.
+* User ratings in relation to a genre. A user maybe likes Horror and Action but rates movies of other genres typically lower.
+* User ratings in relation to movie release year.
+* User ratings in relation to popularity of movies (indie vs blockbuster).
+
+And probably lots more.
+
+The dataset *edx* contains `r sum(is.na(edx))` missing values.
+
+```{r echo=FALSE, warning=FALSE}
+# List genres 
+unique_genres <- unique(unlist(strsplit(edx$genres, "\\|")))
+```
+
+Lets list all genres.
+
+`r kable(data.frame(Genres = unique_genres))`
+
+We notice a unusual genre named *(no genres listed)*.
+
+`r knitr::kable(subset(edx, genres=="(no genres listed)")) %>% kable_styling(font_size=8, latex_options="hold_position")`
+
+On further investigation, only one movie (Pull My Daisy) has no genre listed. According to IMDB the genre of this movie from 1958 is "Short". Let's separate the genres listed and add the first three of each movie into separate columns.
+
+```{r echo=FALSE, warning=FALSE, results='asis'}
+# "Pull My Daisy" from 1958 is the only movie without a genre. According to IMDB its genre is "Short".
+edx$genres <- ifelse(edx$genres == "(no genres listed)", "Short", edx$genres)
+
+# Extract first few listed genres per movie in separate columns
+edx$main_genre  <- sapply(strsplit(edx$genres, "\\|"), function(x) x[1])
+edx$side1_genre <- sapply(strsplit(edx$genres, "\\|"), function(x) x[2])
+edx$side2_genre <- sapply(strsplit(edx$genres, "\\|"), function(x) x[3])
+```
+
+As we have seen, there are `r { length(unique(unlist(strsplit(edx$genres, "\\|")))) }` unique genres in the dataset.
+
+Then we transform the UNIX timestamps to date/time and for ease of use also extract the year the movie was rated. And separate the release year, embedded in the title, for possible further investigation.
+
+```{r echo=FALSE}
+# Extract Rating Year
+edx <- edx %>%
+  mutate(date=as_datetime(timestamp), yearrated=year(date))  
+
+# Extract Release Year
+edx <- edx %>%
+  mutate(releaseyear=as.numeric(str_extract(str_extract(title, "[/(]\\d{4}[/)]$"), regex("\\d{4}"))))
+```
+
+Now some columns are added for further inspection, lets see the table again.
+
+`r knitr::kable(head(edx)) %>% kable_styling(font_size=4, latex_options="hold_position")`
+
+### Distributions
+Lets plot some distributions, starting the distribution of ratings.
+
+```{r echo=FALSE, warning=FALSE, results='asis', out.width="70%"}
+# Distribution of ratings 
+edx %>% 
+  group_by(rating) %>% 
+  summarise(perc = n()/nrow(edx)) %>% 
+  ggplot(aes(rating, perc)) + 
+    geom_col() + 
+    theme_light() +
+    labs(x="Rating", y="%", title = "Rating distribution overall")
+```
+
+Most ratings are given as full number ratings (4, 3 or 5). Also the half-point ratings distribution follows a similar  distribution as the full number ratings.
+
+Now the distribution of the genres.
+
+```{r echo=FALSE, warning=FALSE, results='asis', out.width="70%"}
+# Distribution of genres
+edx %>% 
+  group_by(main_genre) %>%
+  summarise(perc = n()/nrow(edx)) %>% 
+  ggplot(aes(reorder(main_genre, -perc), perc)) +
+    geom_col() +
+    theme_light() +
+    theme(axis.text.x = element_text(angle=90)) +
+    labs(x="Genre", y="% of movies", title = "Distribution of genres")
+```
+
+Most genres listed are Action, Comedy and Drama.
+What about when taking the sub genres into account.
+
+```{r echo=FALSE, warning=FALSE, results='asis', out.width="70%"}
+edx %>%
+  select(main_genre, side1_genre, side2_genre) %>%
+  pivot_longer(cols=c(main_genre, side1_genre, side2_genre), values_to = "genre", values_drop_na = TRUE) %>%
+  group_by(genre) %>%
+  summarise(perc = n()/nrow(edx)) %>% 
+  ggplot(aes(reorder(genre, -perc), perc)) +
+    geom_col() +
+    theme_light() +
+    theme(axis.text.x = element_text(angle=90)) +
+    labs(x="Genre", y="% of movies", title = "Distribution of genres (including subgenres)")
+```
+
+When second and third listed genres are taken into account, the distribution is much finer. Top genres are still Drama, Comedy and Action but positions changed slightly. Drama is therefore an often used side genre, e.g. in combination with Romance, Thriller or others.
+
+### Genres
+Lets plot the average rating against the genres.
+
+```{r echo=FALSE, warning=FALSE, results='asis', out.width="70%"}
+# Ratings per genre
+edx %>% 
+  group_by(main_genre) %>%
+  summarise(avg_genre_rating = mean(rating)) %>%
+  arrange(desc(avg_genre_rating)) %>%
+  ggplot(aes(reorder(main_genre, -avg_genre_rating), avg_genre_rating)) +
+    geom_col() +
+    theme_light() +
+    theme(axis.text.x = element_text(angle=90)) +
+    labs(x="Genre", y="Average Rating", title = "Rating distribution overall")
+```
+
+Ratings of genres show "intellectual" movie genres (e.g. Film-Noir, Crime, Drama..) are rated higher than movie genres associated with entertainment (e.g. Action, Fantasy, Horror)
+
+And for average ratings of genre combinations with more than 50000 ratings.
+
+```{r echo=FALSE, warning=FALSE, results='asis', out.width="70%"}
+edx %>% 
+  group_by(genres) %>%
+  summarize(n=n(), avg=mean(rating)) %>%
+  filter(n >= 50000) %>% 
+  mutate(genres = reorder(genres, -avg)) %>%
+  ggplot(aes(x=genres, y=avg)) + 
+    geom_col() +
+    theme_light() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(x="Genre combinations", y="Avg rating", title="Avg rating of genres with combinations")
+```
+
+When taken genre combinations into account, a similar picture is painted, but some entertainment genre combinations, notably a Action combination, make it higher up the list (e.g. Action|Drama|War, Action|Adventure)
+
+Average rating distribution of movies.
+
+```{r echo=FALSE, warning=FALSE, results='asis', out.width="70%"}
+edx %>% 
+  group_by(movieId) %>%
+  summarise(avg_rating = sum(rating)/n()) %>%
+  ggplot(aes(avg_rating)) +
+    geom_histogram(bins=50) + 
+    theme_light() +
+    labs(x="Avg Rating", y="Movies", title = "Number of ratings per movie")
+```
+
+Only very few movies get an average rating above about 4.2. Most average ratings are between 2.5 and 4.
+
+Average rating distribution of users
+
+```{r echo=FALSE, warning=FALSE, results='asis', out.width="70%"}
+edx %>% 
+  group_by(userId) %>%
+  summarise(avg_rating = sum(rating)/n()) %>%
+  ggplot(aes(avg_rating)) +
+    geom_histogram(bins=50) + 
+    theme_light() +
+    labs(x="Avg Rating", y="Users", title = "Avg ratings of users")
+```
+
+Most users rate movies between 3.5 and 4.2. This is higher than we've seen before on the average rating distribution of movies.
+
+Number of ratings per user
+
+```{r echo=FALSE, warning=FALSE, results='asis', out.width="70%"}
+edx %>% 
+  count(userId) %>% 
+  ggplot(aes(n)) + 
+    geom_histogram( bins=50) +
+    scale_x_log10() +
+    #scale_y_log10() +  # log10 on number of ratings axis provides not a better readable graph
+    theme_light() +
+    labs(x = "Users", y = "Number of ratings")
+```
+
+Most users rate between a few and about 100 movies. 
+
+Average rating per release year with trendline
+
+```{r echo=FALSE, warning=FALSE, results='asis'}
+edx %>% 
+  group_by(releaseyear) %>%
+  summarise(rating = mean(rating)) %>%
+  ggplot(aes(releaseyear, rating)) +
+    geom_point() +
+    geom_smooth(method = "lm", formula = y ~ poly(x,6)) +
+    theme_light() +
+    labs(x="Release year", y="Avg rating", title="Avg rating per release year")
+```
+
+Movies released before 1970 are generally rated higher than movies released in the last two decades. This is a know effect (only good stuff survive the test of time).
+
+Number of released movies per year
+
+```{r echo=FALSE, warning=FALSE, results='asis'}
+edx %>%
+  group_by(releaseyear) %>%
+  summarise(n=n()) %>%
+  ggplot(aes(releaseyear, n)) +
+    geom_point() +
+    geom_smooth(method = "lm", formula = y ~ poly(x,6)) +
+    theme_light() +
+    labs(x="Release Year", y="NOF Movies", title="Nr of movies released per year")
+```
+
+Movie releases were relative stable before the 1970, then picked up and almost exploded 1990 and the following years, probably due to advancements in technology, production and market (e.g. movie theaters, movie rentals, tv...). Since before  2000 the number of movies released collapsed as quickly as its explosion a decade earlier.
+
+Number of ratings per year. Only include the years from 1996 to 2008, data before and after is 0.
+
+```{r echo=FALSE, warning=FALSE, results='asis'}
+edx %>%
+  group_by(yearrated) %>%
+  summarise(n=n()) %>%
+  ggplot(aes(yearrated, n)) +
+    geom_point() +
+    geom_smooth(method = "lm", formula = y ~ poly(x,6)) +
+    theme_light() +
+    xlim(1996, 2008) +
+    labs(x="Year rated", y="NOF Movies", title="Nr of movies rated per year")
+```
+
+Movie ratings per year are stable with some outliers.
+
+Get the average rating of movie per genre but in 5 year bins.
+
+```{r echo=FALSE, warning=FALSE, results='asis'}
+# average rating of movies of genres in 5-year bins
+edx_5yr <- edx %>%
+  mutate(five_year = floor((releaseyear - 1) / 5) * 5 + 1) %>%
+  group_by(main_genre, five_year) %>%
+  summarize(mean_rating = mean(rating, na.rm = TRUE)) %>%
+  as.data.frame()
+
+# include only some selected genres
+edx_5yr_genre <- filter(edx_5yr, main_genre %in% c("Fantasy", "Action", "Adventure", "Drama", "Horror", "Thriller"))
+
+# plot the average rating of a genre with an overlayed fitting curve
+ggplot(edx_5yr_genre, aes(x = five_year, y = mean_rating, color = main_genre)) +
+  geom_line() +
+  geom_smooth(method = "lm", formula = y ~ poly(x,8), se = FALSE, size = 1.5) +
+  scale_x_continuous(limits = c(1915, 2008), breaks = seq(1915, 2008, 5)) +
+  labs(x = "Year", y = "Average Rating", color = "Genre")
+```
+
+Some genres have pretty consistent average ratings over the years, others like e.g. Horror or Fantasy fluctuate a lot more.
+
+\newpage
+# Model
+Prepare the training and test datasets and create a table for the RMSE results as we develop the model.
+I learned in the mean+movie approach, that all movieIds must be present in the training dataset, 
+otherwise the test set will have movieId's where there was no training data on it. I guessed
+this will also be the case for userId and the main genre. 
+
+```{r echo=FALSE}
+set.seed(42) # because 42 is always the answer
+
+# split data into training and test set
+test_index <- createDataPartition(y = edx$rating, times=1, p=0.2, list=FALSE)
+train_set <- edx[-test_index,]
+test_set <- edx[test_index,]
+
+# Table of model results (RMSE)
+ml_results <- tibble()
+
+# Make sure all movieId and userId in the test_set are also in the train_set.
+test_set_final <- test_set %>%
+  as_tibble() %>%
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId") %>%
+  semi_join(train_set, by = "main_genre")
+
+# Add the removed rows from the test_set to the train_set
+removed <- anti_join(
+  as_tibble(test_set),
+  test_set_final,
+  by = names(test_set_final)
+)
+train_set <- rbind(train_set, removed)
+test_set <- test_set_final
+
+# cleanup
+rm(test_set_final, test_index, removed)
+```
+
+## Guessing
+Try stupid approach by guessing a rating from 0 to 5.
+
+```{r echo=TRUE, warning=FALSE}
+# create list of guessed ratings and make "guesses" for the size of the test set
+guess_model <- sample(c(0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5), length(test_set$rating), replace=TRUE)
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+# calculate RMSE of the guessing
+rmse_guessing <- RMSE(test_set$rating, guess_model)
+
+# add result to table 
+ml_results <- ml_results %>%
+  bind_rows(tibble(Model="Guessing", RMSE=rmse_guessing))
+
+# Resulting RMSE is about 2.156. Pretty far of the 0.865 we are after.
+# cleanup
+rm(guess_model)
+```
+
+The resulting `r rmse_guessing` is still far of the < 0.865, no suprise.
+
+`r kable(ml_results)`
+
+## Mean
+Get the average of all ratings on the training set and use this to predict a movie.
+
+```{r echo=TRUE}
+# Average mean of every movie in the training set
+avg_model <- mean(train_set$rating)
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+# RMSE (on test_set)
+rmse_avg_model <- RMSE(test_set$rating, avg_model)
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="Avg Model", RMSE=rmse_avg_model))
+
+# cleanup
+rm(avg_model)
+```
+
+The average of every movie used for predicting a rating results in `r { rmse_avg_model }`. Closer but still far off.
+
+`r kable(ml_results)`
+
+## Genre bias
+Evaluate the genre bias, the deviation from the movie average for each genre. 
+
+```{r echo=TRUE}
+# average rating of all movies
+movie_avg <- mean(train_set$rating)
+
+# bias of genres. deviation from the average for each genre. e.g. Film-Noir is 0.638 
+# above average, Horror 0.48 below average.
+genre_bias <- train_set %>%
+  group_by(main_genre) %>%
+  summarise(deviation_genre = mean(rating - movie_avg))
+
+# combine genre bias with the test_set
+mean_genre_model <- test_set %>%
+  inner_join(genre_bias, by="main_genre")
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+# predict the rating, genre bias of the movie in the test_set + average
+mean_genre_model$predicted_rating <- mean_genre_model$deviation_genre + movie_avg
+
+# calculate RMSE (on test_set)
+rmse_mean_genre_model <- RMSE(test_set$rating, mean_genre_model$predicted_rating)
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="Genre Model", RMSE=rmse_mean_genre_model))
+
+# cleanup
+rm(mean_genre_model)
+```
+
+The RMSE is a bit better at `r { rmse_mean_genre_model }` than just take the average like before.
+
+`r kable(ml_results)`
+
+## Movie bias
+The movie_bias is the difference of the avg movie rating to the mean rating. 
+
+```{r echo=TRUE}
+movie_bias <- train_set %>%
+  group_by(movieId) %>%
+  summarise(deviation_movie = mean(rating - movie_avg))
+
+# on the test set add the movie avg (3.512) with the difference the movie had 
+# to the avg in the training set and pull that column as a vector
+mean_movie_model <- test_set %>%
+  inner_join(movie_bias, by="movieId")
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+# predict the rating, based the movie (by movieId) on the deviation + average 
+mean_movie_model$predicted_rating <- mean_movie_model$deviation_movie + movie_avg
+
+# RMSE (on test_set)
+rmse_mean_movie_model <- RMSE(test_set$rating, mean_movie_model$predicted_rating)
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="Movie Model", RMSE=rmse_mean_movie_model))
+
+# cleanup
+rm(mean_movie_model)
+```
+
+With and RMSE of `r { rmse_mean_movie_model }` we are now in the sub 1 category.
+
+`r kable(ml_results)`
+
+## User bias
+Lets inspect the user bias. 
+
+```{r echo=TRUE}
+user_bias <- train_set %>%
+  group_by(userId) %>%
+  summarise(deviation_user = mean(rating - movie_avg))
+
+mean_user_model <- test_set %>%
+  inner_join(user_bias, by="userId")
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+# predict the rating, based the movie (by movieId) on the deviation + average 
+mean_user_model$predicted_rating <- mean_user_model$deviation_user + movie_avg
+
+# RMSE (on test_set)
+rmse_mean_user_model <- RMSE(test_set$rating, mean_user_model$predicted_rating)
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="User Model", RMSE=rmse_mean_user_model))
+
+# show the resulting RMSE table
+ml_results
+
+# With and RMSE of 0.978 
+# cleanup
+rm(mean_user_model)
+```
+
+The user bias results in an RMSE of `r { rmse_mean_user_model }`.
+
+`r kable(ml_results)`
+
+
+## Release year bias
+Lets see if the release year will bring the RMSE down.
+
+```{r echo=TRUE}
+releaseyear_bias <- train_set %>%
+  group_by(releaseyear) %>%
+  summarise(deviation_releaseyear = mean(rating - movie_avg))
+
+mean_releaseyear_model <- test_set %>%
+  inner_join(releaseyear_bias, by="releaseyear")
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+# predict the rating, based the release year on the deviation + average 
+mean_releaseyear_model$predicted_rating <- mean_releaseyear_model$deviation_releaseyear + movie_avg
+
+# RMSE (on test_set)
+rmse_mean_releaseyear_model <- RMSE(test_set$rating, mean_releaseyear_model$predicted_rating)
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="Release Year Model", RMSE=rmse_mean_releaseyear_model))
+
+# show the resulting RMSE table
+ml_results
+
+# With and RMSE of 0.978 
+# cleanup
+rm(mean_releaseyear_model)
+```
+
+The release year of a movie bias results in an RMSE of `r { rmse_mean_releaseyear_model }`.
+
+`r kable(ml_results)`
+
+## User and Movie bias
+Let's add the average rating of a user into the mix. 
+
+```{r echo=TRUE}
+# user_bias is the differnece of the avg user rating to the mean rating
+user_bias <- train_set %>%
+  group_by(userId) %>%
+  summarise(deviation_user = mean(rating - movie_avg))
+
+mean_movie_user_model <- test_set %>%
+  inner_join(movie_bias, by="movieId") %>%
+  inner_join(user_bias, by="userId")
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+# predict the rating, based the movie (by movieId) and the user (by userId) on the deviation + average 
+mean_movie_user_model$predicted_rating <- mean_movie_user_model$deviation_user + 
+                                          mean_movie_user_model$deviation_movie + 
+                                          movie_avg
+
+# RMSE (on test_set)
+rmse_mean_movie_user_model <- RMSE(test_set$rating, mean_movie_user_model$predicted_rating)
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="Movie + User Model", RMSE=rmse_mean_movie_user_model))
+
+rm(mean_movie_user_model)
+```
+
+The user and movie gets us below 0.9. But `r { rmse_mean_movie_user_model }` is still not near the desired < 0.865.
+
+`r kable(ml_results)`
+
+
+## User and Movie and Release Year bias
+To the last model we add the release year.
+
+```{r echo=TRUE}
+mean_movie_user_releaseyear_model <- test_set %>%
+  left_join(movie_bias, by='movieId') %>%
+  left_join(user_bias, by='userId') %>%
+  left_join(releaseyear_bias, by='releaseyear')
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+# make prediction on test set with the movie/user/releaseyear model
+mean_movie_user_releaseyear_model$predicted_rating <- mean_movie_user_releaseyear_model$deviation_user + 
+                                                      mean_movie_user_releaseyear_model$deviation_movie + 
+                                                      mean_movie_user_releaseyear_model$deviation_releaseyear + 
+                                                      movie_avg
+
+# RMSE (on test_set)
+rmse_mean_movie_user_releaseyear_model <- RMSE(test_set$rating, mean_movie_user_releaseyear_model$predicted_rating)
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="Movie + User + Release Year Model", RMSE=rmse_mean_movie_user_releaseyear_model))
+
+# show the resulting RMSE table
+ml_results
+
+rm(mean_movie_user_releaseyear_model)
+```
+
+With the release year added to the user and movie bias we get `r { rmse_mean_movie_user_releaseyear_model }`.
+
+`r kable(ml_results)`
+
+## User, Movie and Genre bias
+Now combine user, movie and genre together in a single model.
+
+```{r echo=TRUE}
+mean_movie_user_genre_model <- test_set %>%
+  inner_join(movie_bias, by="movieId") %>%
+  inner_join(user_bias, by="userId") %>%
+  inner_join(genre_bias, by="main_genre")
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+mean_movie_user_genre_model$predicted_rating <- mean_movie_user_genre_model$deviation_user + 
+                                                mean_movie_user_genre_model$deviation_movie + 
+                                                mean_movie_user_genre_model$deviation_genre + 
+                                                movie_avg
+
+# RMSE (on test_set)
+rmse_mean_movie_user_genre_model <- RMSE(test_set$rating, mean_movie_user_genre_model$predicted_rating)
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="Movie + User + Genre Model", RMSE=rmse_mean_movie_user_genre_model))
+```
+
+This resulted in `r { rmse_mean_movie_user_genre_model } `, which is worse than only using the movie and user. Maybe some tuning will fix it.
+
+`r kable(ml_results)`
+
+
+## User, Movie, Release Year and Genre bias
+Now combine user, movie, release year and genre together in a single model.
+
+```{r echo=TRUE}
+mean_movie_user_genre_releaseyear_model <- test_set %>%
+  inner_join(movie_bias, by="movieId") %>%
+  inner_join(user_bias, by="userId") %>%
+  inner_join(genre_bias, by="main_genre") %>%
+  inner_join(releaseyear_bias, by="releaseyear")
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+# make prediction on test set with the movie/user/genre model
+mean_movie_user_genre_releaseyear_model$predicted_rating <- mean_movie_user_genre_releaseyear_model$deviation_user + 
+                                                mean_movie_user_genre_releaseyear_model$deviation_movie + 
+                                                mean_movie_user_genre_releaseyear_model$deviation_genre + 
+                                                mean_movie_user_genre_releaseyear_model$deviation_releaseyear + 
+                                                movie_avg
+
+# RMSE (on test_set)
+rmse_mean_movie_user_genre_releaseyear_model <- RMSE(test_set$rating, mean_movie_user_genre_releaseyear_model$predicted_rating)
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="Movie + User + Genre + Release Year Model", RMSE=rmse_mean_movie_user_genre_releaseyear_model))
+
+# show the resulting RMSE table
+ml_results
+
+# cleanup
+rm(mean_movie_user_genre_releaseyear_model)
+```
+
+This resulted in `r { rmse_mean_movie_user_genre_releaseyear_model } `.
+
+`r kable(ml_results)`
+
+## User, Movie, Release Year and first three listed genres bias
+Same as before but instead of the whole genres list as a whole the first three listed genres are used. 
+
+```{r echo=TRUE}
+main_genre_bias <- train_set %>%
+  group_by(main_genre) %>%
+  summarise(deviation_main_genre = mean(rating - movie_avg))
+
+side1_genre_bias <- train_set %>%
+  group_by(side1_genre) %>%
+  summarise(deviation_side1_genre = mean(rating - movie_avg))
+
+side2_genre_bias <- train_set %>%
+  group_by(side2_genre) %>%
+  summarise(deviation_side2_genre = mean(rating - movie_avg))
+
+mean_movie_user_all_genre_model <- test_set %>%
+  inner_join(movie_bias, by="movieId") %>%
+  inner_join(user_bias, by="userId") %>%
+  inner_join(main_genre_bias, by="main_genre") %>%
+  inner_join(side1_genre_bias, by="side1_genre") %>%
+  inner_join(side2_genre_bias, by="side2_genre")
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+# make prediction on test set with the movie/user/genre model
+mean_movie_user_all_genre_model$predicted_rating <- 
+  mean_movie_user_all_genre_model$deviation_user + 
+  mean_movie_user_all_genre_model$deviation_movie + 
+  mean_movie_user_all_genre_model$deviation_main_genre + 
+  mean_movie_user_all_genre_model$deviation_side1_genre + 
+  mean_movie_user_all_genre_model$deviation_side2_genre + 
+  movie_avg
+
+# RMSE (on test_set)
+rmse_mean_movie_user_all_genre_model <- RMSE(test_set$rating, mean_movie_user_all_genre_model$predicted_rating)
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="Movie + User + All Genre Model", RMSE=rmse_mean_movie_user_all_genre_model))
+
+# show the resulting RMSE table
+ml_results
+
+# This resulted in 0.9023256, which is worse than only using the movie and user. Maybe some tuning will fix it.
+
+# cleanup
+rm(mean_movie_user_all_genre_model)
+```
+
+This resulted in `r { rmse_mean_movie_user_all_genre_model } `.
+
+`r kable(ml_results)`
+
+
+```{r echo=FALSE}
+########### REGULARIZATION ##############
+lambdas <- seq(0.00, 0.001, 0.0001)
+
+rmses <- sapply(lambdas, function(lambda) {
+  
+  genre_bias <- train_set %>%
+    group_by(main_genre) %>%
+    summarise(deviation_genre = sum(rating - movie_avg)/(n() + lambda))
+
+  model <- test_set %>%
+    inner_join(genre_bias, by="main_genre")
+  
+  model$predicted_rating <- model$deviation_genre + movie_avg
+
+  return(RMSE(test_set$rating, model$predicted_rating))
+})
+
+#qplot(lambdas, rmses, geom = "line")
+#lambda <- lambdas[which.min(rmses)]
+#print(lambda)
+```
+
+## Tuning
+
+Lets try to tune the three biases, each individually and plot the tuning parameter and the resulting RMSE.
+
+```{r echo=FALSE, warning=FALSE, results='asis', out.width="50%"}
+tuning_param <- seq(0, 1, 0.1)
+
+### tuning genre bias
+rmse_seq <- sapply(tuning_param, function(t) {
+  avg <- mean(train_set$rating)
+  
+  genre_bias <- train_set %>%
+    group_by(main_genre) %>%
+    summarise(deviation_genre = t * sum(rating - movie_avg)/n())
+  
+  movie_bias <- train_set %>%
+    group_by(movieId) %>%
+    summarise(deviation_movie = 0.8944 * sum(rating - movie_avg)/n())
+  
+  user_bias <- train_set %>%
+    group_by(userId) %>%
+    summarise(deviation_user = 0.798 * sum(rating - movie_avg)/n())
+  
+  model <- test_set %>%
+    inner_join(genre_bias, by="main_genre") %>%
+    inner_join(movie_bias, by="movieId") %>%
+    inner_join(user_bias, by="userId")
+  
+  model$predicted_rating <- model$deviation_genre + 
+                            model$deviation_user + 
+                            model$deviation_movie + 
+                            movie_avg
+  
+  return(RMSE(test_set$rating, model$predicted_rating))
+})
+
+# plot the tuning parameters
+qplot(tuning_param, rmse_seq, geom="line")
+
+# tuning movie bias
+rmse_seq <- sapply(tuning_param, function(t) {
+  avg <- mean(train_set$rating)
+  
+  genre_bias <- train_set %>%
+    group_by(main_genre) %>%
+    summarise(deviation_genre = 0.005 * sum(rating - movie_avg)/n())
+  
+  movie_bias <- train_set %>%
+    group_by(movieId) %>%
+    summarise(deviation_movie = t * sum(rating - movie_avg)/n())
+  
+  user_bias <- train_set %>%
+    group_by(userId) %>%
+    summarise(deviation_user = 0.798 * sum(rating - movie_avg)/n())
+  
+  model <- test_set %>%
+    inner_join(genre_bias, by="main_genre") %>%
+    inner_join(movie_bias, by="movieId") %>%
+    inner_join(user_bias, by="userId")
+  
+  model$predicted_rating <- model$deviation_genre + 
+    model$deviation_user + 
+    model$deviation_movie + 
+    movie_avg
+  
+  return(RMSE(test_set$rating, model$predicted_rating))
+})
+
+# plot the tuning parameters
+qplot(tuning_param, rmse_seq, geom="line")
+
+#### tuning user bias
+rmse_seq <- sapply(tuning_param, function(t) {
+  avg <- mean(train_set$rating)
+  
+  genre_bias <- train_set %>%
+    group_by(main_genre) %>%
+    summarise(deviation_genre = 0.005 * sum(rating - movie_avg)/n())
+  
+  movie_bias <- train_set %>%
+    group_by(movieId) %>%
+    summarise(deviation_movie = 0.8944 * sum(rating - movie_avg)/n())
+  
+  user_bias <- train_set %>%
+    group_by(userId) %>%
+    summarise(deviation_user = t * sum(rating - movie_avg)/n())
+  
+  model <- test_set %>%
+    inner_join(genre_bias, by="main_genre") %>%
+    inner_join(movie_bias, by="movieId") %>%
+    inner_join(user_bias, by="userId")
+  
+  model$predicted_rating <- model$deviation_genre + 
+    model$deviation_user + 
+    model$deviation_movie + 
+    movie_avg
+  
+  return(RMSE(test_set$rating, model$predicted_rating))
+})
+
+# plot the tuning parameters
+qplot(tuning_param, rmse_seq, geom="line")
+```
+
+After searching for each tuning parameter individually these are the final tuning parameters:
+
+* genre_bias: 0.0055
+* movie_bias: 0.8944
+* user_bias: 0.798
+
+The resulting tuned function with the individual bias tuning factors:
+
+```{r echo=TRUE}
+tuned_movie_user_genre_model <- function(t) {
+  avg <- mean(train_set$rating)
+  
+  genre_bias <- train_set %>%
+    group_by(main_genre) %>%
+    summarise(deviation_genre = 0.0055 * sum(rating - movie_avg)/n())
+  
+  movie_bias <- train_set %>%
+    group_by(movieId) %>%
+    summarise(deviation_movie = 0.8944 * sum(rating - movie_avg)/n())
+  
+  user_bias <- train_set %>%
+    group_by(userId) %>%
+    summarise(deviation_user = 0.798 * sum(rating - movie_avg)/n())
+  
+  model <- test_set %>%
+    inner_join(genre_bias, by="main_genre") %>%
+    inner_join(movie_bias, by="movieId") %>%
+    inner_join(user_bias, by="userId")
+
+  model$predicted_rating <- model$deviation_genre + 
+                            model$deviation_user + 
+                            model$deviation_movie + 
+                            movie_avg
+  
+  return(RMSE(test_set$rating, model$predicted_rating))
+}
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="Tuned model", RMSE=tuned_movie_user_genre_model()))
+
+```
+
+`r knitr::kable(ml_results) %>% kable_styling(font_size=8, latex_options="hold_position")`
+
+## Results
+### RMSE
+Lets test the final model with its tuning in place against the verification set.
+
+```{r echo=TRUE}
+final_model_prediction <- function() {
+  avg <- mean(train_set$rating)
+  
+  #genre_bias <- train_set %>%
+  #  group_by(main_genre) %>%
+  #  summarise(deviation_genre = 0.0055 * sum(rating - movie_avg)/n())
+  
+  movie_bias <- train_set %>%
+    group_by(movieId) %>%
+    summarise(deviation_movie = 0.8944 * sum(rating - movie_avg)/n())
+  
+  user_bias <- train_set %>%
+    group_by(userId) %>%
+    summarise(deviation_user = 0.798 * sum(rating - movie_avg)/n())
+  
+  model <- final_holdout_test %>%
+    #inner_join(genre_bias, by="main_genre") %>%
+    inner_join(movie_bias, by="movieId") %>%
+    inner_join(user_bias, by="userId")
+  
+  model$predicted_rating <- #model$deviation_genre + 
+    model$deviation_user + 
+    model$deviation_movie + 
+    movie_avg
+  return(model$predicted_rating)
+}
+```
+
+```{r include=FALSE, echo=TRUE, warning=FALSE}
+# RMSE (on verification)
+rmse_final_model <- RMSE(final_holdout_test$rating, final_model_prediction())
+
+# add result to table
+ml_results <- ml_results %>% 
+  bind_rows(tibble(Model="Final Model Verification", RMSE=rmse_final_model))
+```
+
+This are all the achieved model RMSE:
+
+`r knitr::kable(ml_results) %>% kable_styling(font_size=8, latex_options="hold_position")`
+
+# Conclusion
+Even with all this tuning, lower than `r rmse_final_model` is not possible with this approach. More training and maybe separating different features is needed.  
+
+### Future Improvements
+Further information about the users could improve accuracy, e.g. shopping preferences, music taste, background information like education level. But there privacy concern about the usage of user personal data has to be considered. Training with larger dataset would be beneficial but would require more capable systems (e.g. with GPU). 
+Even with this dataset and no more features or data other model algorithms could be tried, for example KNN, SVM or Decision Tree could be tried. For further interesting model trainings neither the time nor the available computing power was sufficient.
+
+
+\newpage
+# Resources
+[1] Rafael Irizarry. 2018. Introduction to Data Science.<https://rafalab.dfci.harvard.edu/dsbook/>
+
+# System
+## Hardware
+```{r include=FALSE}
+cpu_info <- get_cpu()
+ram_info <- get_ram()
+ram_formatted <- paste0(format(round(as.numeric(ram_info) / 1024^3, 2), nsmall = 2), " GB")
+```
+
+All above computations are done with an `r { cpu_info$model_name }` CPU with `r { cpu_info$no_of_cores }` and `r { ram_formatted }` of RAM.
+
+## Software
+This report is compiled using R markdown with RStudio.
+
+```{r echo=TRUE, warning=FALSE}
+sessionInfo()
+```
