@@ -17,7 +17,8 @@ header-includes:
 - \usepackage{listings}
 - \lstset{breaklines=true}
 ---
-![]("C:/RProj/MovieLens/MovieLens/graphic.png"){width=25%}
+![Background Image](C:/RProj/MovieLens/MovieLens/graphic.png){width=50%, height=50%, opacity=.02}
+
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo=TRUE, progress=TRUE, verbose=TRUE, dev='pdf')
@@ -27,10 +28,7 @@ library(pacman)
 p_load(ggplot2, devtools, benchmarkme, rmarkdown, lubridate, scales, parallel, stringr, kableExtra, tidyverse, caret)
 
 options(tinytex.verbose = TRUE)
-
 ```
-
-
 
 \newpage
 
@@ -53,73 +51,74 @@ This dataset serves as a portal for exploration, providing valuable insights int
 The analysis revealed interesting properties and correlations of the various features. Among other things, older films tended to be rated higher than newer ones, and some genres were generally rated slightly higher or lower. Above all, however, the films and the users play a decisive role in developing a model. Unfortunately, only an RMSE of about 0.879 was possible with this method. For further interesting model trainings neither the time nor the available computing power was sufficient, for example other training approaches like KNN or Decision Tree could be tried.
 
 \newpage
+
 ## Code provided by EdX in the Capstone directons for the project
 
 
+> ```{r}
+> # Create edx and final_holdout_test sets
+> 
+> # Note: this process could take a couple of minutes
+> 
+> if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+> if(!require(caret)) install.packages("caret", repos = "http.cran.us.r-project.org")
+> 
+> library(tidyverse)
+> library(caret)
+> 
+> # MovieLens 10M dataset:
+> # https://grouplens.org/datasets/movielens/10m/
+> # http://files.grouplens.org/datasets/movielens/ml-10m.zip
+> 
+> options(timeout = 250)
+> 
+> dl <- "ml-10M100K.zip"
+> if(!file.exists(dl))
+>   download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+> 
+> ratings_file <- "ml-10M100K/ratings.dat"
+> if(!file.exists(ratings_file))
+>   unzip(dl, ratings_file)
+> 
+> movies_file <- "ml-10M100K/movies.dat"
+> if(!file.exists(movies_file))
+>   unzip(dl, movies_file)
+> 
+> ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+>                          stringsAsFactors = FALSE)
+> colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+> ratings <- ratings %>%
+>   mutate(userId = as.integer(userId),
+>          movieId = as.integer(movieId),
+>          rating = as.numeric(rating),
+>          timestamp = as.integer(timestamp))
+> 
+> movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+>                         stringsAsFactors = FALSE)
+> colnames(movies) <- c("movieId", "title", "genres")
+> movies <- movies %>%
+>   mutate(movieId = as.integer(movieId))
+> 
+> movielens <- left_join(ratings, movies, by = "movieId")
+> 
+> # Final hold-out test set will be 10% of MovieLens data
+> set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+> # set.seed(1) # if using R 3.5 or earlier
+> test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+> edx <- movielens[-test_index,]
+> temp <- movielens[test_index,]
+> 
+> # Make sure userId and movieId in final hold-out test set are also in edx set
+> final_holdout_test <- temp %>% 
+>   semi_join(edx, by = "movieId") %>%
+>   semi_join(edx, by = "userId")
+> 
+> # Add rows removed from final hold-out test set back into edx set
+> removed <- anti_join(temp, final_holdout_test)
+> ```
 
-```{r include=FALSE, echo=TRUE, warning=FALSE}
-##########################################################
-# Create edx and final_holdout_test sets 
-##########################################################
 
-# Note: this process could take a couple of minutes
 
-if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
-if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
-
-library(tidyverse)
-library(caret)
-
-# MovieLens 10M dataset:
-# https://grouplens.org/datasets/movielens/10m/
-# http://files.grouplens.org/datasets/movielens/ml-10m.zip
-
-options(timeout = 250)
-
-dl <- "ml-10M100K.zip"
-if(!file.exists(dl))
-  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
-
-ratings_file <- "ml-10M100K/ratings.dat"
-if(!file.exists(ratings_file))
-  unzip(dl, ratings_file)
-
-movies_file <- "ml-10M100K/movies.dat"
-if(!file.exists(movies_file))
-  unzip(dl, movies_file)
-
-ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
-                         stringsAsFactors = FALSE)
-colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
-ratings <- ratings %>%
-  mutate(userId = as.integer(userId),
-         movieId = as.integer(movieId),
-         rating = as.numeric(rating),
-         timestamp = as.integer(timestamp))
-
-movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
-                        stringsAsFactors = FALSE)
-colnames(movies) <- c("movieId", "title", "genres")
-movies <- movies %>%
-  mutate(movieId = as.integer(movieId))
-
-movielens <- left_join(ratings, movies, by = "movieId")
-
-# Final hold-out test set will be 10% of MovieLens data
-set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
-# set.seed(1) # if using R 3.5 or earlier
-test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
-edx <- movielens[-test_index,]
-temp <- movielens[test_index,]
-
-# Make sure userId and movieId in final hold-out test set are also in edx set
-final_holdout_test <- temp %>% 
-  semi_join(edx, by = "movieId") %>%
-  semi_join(edx, by = "userId")
-
-# Add rows removed from final hold-out test set back into edx set
-removed <- anti_join(temp, final_holdout_test)
-```
 \newpage
 # Analysis
 
@@ -570,6 +569,7 @@ The RMSE is slightly improved at r { rmse_mean_genre_model } compared to simply 
 
 `r kable(ml_results)`
 
+\newpage
 ## Movie bias rating
 
 The movie bias represents the variance between the average movie rating and the overall mean rating.
@@ -873,7 +873,7 @@ rmses <- sapply(lambdas, function(lambda) {
 #lambda <- lambdas[which.min(rmses)]
 #print(lambda)
 ```
-
+\newpage 
 ## Tuning
 
 Lets try to tune the three biases, each individually and plot the tuning parameter and the resulting RMSE.
@@ -911,7 +911,10 @@ rmse_seq <- sapply(tuning_param, function(t) {
 })
 
 # plot the tuning parameters
-qplot(tuning_param, rmse_seq, geom="line")
+qplot(tuning_param, rmse_seq, geom="line", color = I("blue")) +
+  labs(title = "Tuning Parameters vs RMSE",
+       x = "Tuning Parameter",
+       y = "RMSE")
 
 # tuning movie bias
 rmse_seq <- sapply(tuning_param, function(t) {
@@ -943,7 +946,10 @@ rmse_seq <- sapply(tuning_param, function(t) {
 })
 
 # plot the tuning parameters
-qplot(tuning_param, rmse_seq, geom="line")
+qplot(tuning_param, rmse_seq, geom="line", color = I("green")) +
+  labs(title = "Tuning Parameters vs RMSE",
+       x = "Tuning Parameter",
+       y = "RMSE")
 
 #### tuning user bias
 rmse_seq <- sapply(tuning_param, function(t) {
@@ -975,7 +981,10 @@ rmse_seq <- sapply(tuning_param, function(t) {
 })
 
 # plot the tuning parameters
-qplot(tuning_param, rmse_seq, geom="line")
+qplot(tuning_param, rmse_seq, geom="line", color = I("red")) +
+  labs(title = "Tuning Parameters vs RMSE",
+       x = "Tuning Parameter",
+       y = "RMSE")
 ```
 
 After searching for each tuning parameter individually these are the final tuning parameters:
@@ -1026,6 +1035,7 @@ kable(ml_results, format = "latex", booktabs = TRUE, col.names = c("Model", "RMS
   row_spec(0, bold = TRUE, color = "white", background = "#2E86C1") %>%
   row_spec(which(ml_results$RMSE == min(ml_results$RMSE)), background = "#82E0AA")
 
+\newpage
 
 ## Results
 ### RMSE
@@ -1076,7 +1086,7 @@ This are all the achieved model RMSE:
   row_spec(0, bold = TRUE, background = "#2E86C1", color = "white") %>%
   row_spec(which.min(ml_results$RMSE), background = "#82E0AA")
 `
-
+\newpage
 # Conclusion
 Even with all this tuning, lower than `r rmse_final_model` is not possible with this approach. More training and maybe separating different features is needed.  
 
