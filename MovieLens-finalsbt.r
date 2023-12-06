@@ -168,10 +168,6 @@ edx %>%
   theme(axis.text.x = element_text(angle=90)) +
   labs(x="Genre", y="% of movies", title = "Distribution of genres (including subgenres)")
 
-# The prevalent genres predominantly include Action, Comedy, and Drama. Yet, delving into the realm of sub-genres unveils a more nuanced
-# distribution. While Drama, Comedy, and Action still claim the top spots, their positions undergo subtle
-# shifts. Consequently, Drama emerges as a frequently paired side genre, harmonizing seamlessly with genres
-# such as Romance, Thriller, and others.
 
 # Ratings per genre
 edx %>% 
@@ -961,29 +957,22 @@ genre_bias <- train_set %>%
 movie_bias <- train_set %>%
   group_by(movieId) %>%
   summarise(deviation_movie = 0.8925 * sum(rating - movie_avg)/n())
-#summarise(deviation_movie = 0.771 * sum(rating - movie_avg)/n())
 
 user_bias <- train_set %>%
   group_by(userId) %>%
   summarise(deviation_user = 0.801 * sum(rating - movie_avg)/n())
-#summarise(deviation_user = 0.805 * sum(rating - movie_avg)/n())
 
 releaseyear_bias <- train_set %>%
   group_by(releaseyear) %>%
   summarise(deviation_releaseyear = 0.008 * sum(rating - movie_avg)/n())
-#summarise(deviation_releaseyear = 0.121 * sum(rating - movie_avg)/n())
 
 model <- test_set %>%
   #inner_join(genre_bias, by="main_genre") %>%
   inner_join(movie_bias, by="movieId") %>%
   inner_join(user_bias, by="userId")
-#inner_join(releaseyear_bias, by="releaseyear")
 
-model$predicted_rating <- #model$deviation_genre + 
-  model$deviation_user + 
-  model$deviation_movie + 
-  #model$deviation_releaseyear + 
-  movie_avg
+model$predicted_rating <- model$deviation_user + 
+  model$deviation_movie + movie_avg 
 
 final_rmse <- RMSE(test_set$rating, model$predicted_rating)
 final_rmse
